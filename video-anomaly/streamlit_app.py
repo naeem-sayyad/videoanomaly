@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from src.common import config
-from src.common.utils import discover_videos
+from src.common.utils import discover_videos, ensure_dir
 
 REPO_ROOT = Path(__file__).resolve().parent
 RAW_VIDEO_DIR = (REPO_ROOT / "data" / "raw_videos").resolve()
@@ -136,6 +136,27 @@ def _render_csv(title: str, path: Path, key_prefix: str) -> None:
     )
 
 
+def _save_uploaded_videos(uploaded_files) -> Tuple[int, List[str]]:
+    if not uploaded_files:
+        return 0, []
+
+    ensure_dir(RAW_VIDEO_DIR)
+    saved: List[str] = []
+    skipped = 0
+
+    for uploaded in uploaded_files:
+        suffix = Path(uploaded.name).suffix.lower()
+        if suffix not in config.VIDEO_EXTENSIONS:
+            skipped += 1
+            continue
+
+        output_path = RAW_VIDEO_DIR / uploaded.name
+        output_path.write_bytes(uploaded.getbuffer())
+        saved.append(str(output_path.resolve()))
+
+    return skipped, saved
+
+
 def main() -> None:
     st.set_page_config(page_title="Video Anomaly Baselines", layout="wide")
 
@@ -224,6 +245,24 @@ def main() -> None:
     st.caption("Resolved video sources:")
     for source in resolved_sources:
         st.code(source, language="text")
+
+    st.subheader("Upload Videos")
+    uploaded_files = st.file_uploader(
+        "Upload video files for processing",
+        type=["mp4", "mov", "avi", "mkv"],
+        accept_multiple_files=True,
+    )
+    if st.button("Save Uploaded Videos"):
+        skipped, saved = _save_uploaded_videos(uploaded_files)
+        if saved:
+            st.success(f"Saved {len(saved)} video(s) to {RAW_VIDEO_DIR}")
+        if skipped:
+            st.warning(f"Skipped {skipped} file(s) with unsupported extensions")
+        if not saved and not skipped:
+            st.info("No files uploaded")
+
+    existing_raw_videos = discover_videos([str(RAW_VIDEO_DIR)])
+    st.caption(f"Videos currently in data/raw_videos: {len(existing_raw_videos)}")
 
     runtime_env = _build_env(
         {

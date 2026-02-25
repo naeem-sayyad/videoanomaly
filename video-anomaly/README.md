@@ -52,6 +52,7 @@ The sidebar lets you set environment/runtime values for:
 From the UI you can:
 
 - Scan video folders
+- Upload videos into `data/raw_videos/`
 - Run YOLO baseline
 - Run VLM baseline
 - Run merge
