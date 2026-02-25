@@ -61,6 +61,16 @@ GLOBAL_SEED = int(os.getenv("GLOBAL_SEED", "42"))
 CONF_TH = float(os.getenv("CONF_TH", "0.35"))
 EVENT_TH = float(os.getenv("EVENT_TH", "0.15"))
 SAMPLE_FPS = float(os.getenv("SAMPLE_FPS", "1.0"))
+YOLO_MAX_VIDEOS = int(os.getenv("YOLO_MAX_VIDEOS", "0"))
+YOLO_MAX_FRAMES_PER_VIDEO = int(os.getenv("YOLO_MAX_FRAMES_PER_VIDEO", "0"))
+YOLO_MAX_SECONDS = int(os.getenv("YOLO_MAX_SECONDS", "0"))
+YOLO_SUSPICIOUS_CLASSES = [
+    item.strip().lower()
+    for item in os.getenv("YOLO_SUSPICIOUS_CLASSES", "").split(",")
+    if item.strip()
+]
+ROBOFLOW_MAX_RETRIES = int(os.getenv("ROBOFLOW_MAX_RETRIES", "2"))
+ROBOFLOW_RETRY_BACKOFF_SEC = float(os.getenv("ROBOFLOW_RETRY_BACKOFF_SEC", "0.75"))
 
 WINDOW_SEC = int(os.getenv("WINDOW_SEC", "60"))
 N_FRAMES = int(os.getenv("N_FRAMES", "24"))

@@ -58,6 +58,15 @@ From the UI you can:
 - Run merge
 - Download generated CSVs
 
+### If YOLO feels slow or misses suspicious clips
+
+Use these Streamlit sidebar settings for faster, higher-recall iteration:
+
+- Enable `YOLO only uploaded videos`
+- Set `YOLO_MAX_VIDEOS=1` while testing one clip
+- Set `YOLO_MAX_FRAMES_PER_VIDEO=120` (or lower for speed)
+- Set `CONF_TH=0.2` and `EVENT_TH=0.05` for higher recall
+
 ## Deploy to Streamlit Community Cloud
 
 1. Push this folder to a GitHub repo.

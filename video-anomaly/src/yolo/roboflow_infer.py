@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List
@@ -28,6 +29,8 @@ class RoboflowHostedClient:
     version: str
     host: str
     timeout_sec: int
+    max_retries: int
+    retry_backoff_sec: float
 
     def _candidate_urls(self) -> List[str]:
         urls: List[str] = []
@@ -60,36 +63,59 @@ class RoboflowHostedClient:
 
         last_error = ""
         for url in self._candidate_urls():
-            try:
-                response = requests.post(
-                    url,
-                    params=params,
-                    data=payload,
-                    headers=headers,
-                    timeout=self.timeout_sec,
-                )
-            except requests.RequestException as exc:
-                last_error = str(exc)
-                continue
+            for attempt in range(self.max_retries + 1):
+                try:
+                    response = requests.post(
+                        url,
+                        params=params,
+                        data=payload,
+                        headers=headers,
+                        timeout=self.timeout_sec,
+                    )
+                except requests.RequestException as exc:
+                    last_error = str(exc)
+                    if attempt < self.max_retries:
+                        delay = self.retry_backoff_sec * (2**attempt)
+                        time.sleep(delay)
+                        continue
+                    break
 
-            if response.status_code == 404:
-                last_error = f"404 at {url}"
-                continue
+                if response.status_code == 404:
+                    last_error = f"404 at {url}"
+                    break
 
-            response.raise_for_status()
-            return response.json()
+                if response.status_code == 429 or 500 <= response.status_code < 600:
+                    last_error = (
+                        f"HTTP {response.status_code} at {url}: {response.text[:200]}"
+                    )
+                    if attempt < self.max_retries:
+                        delay = self.retry_backoff_sec * (2**attempt)
+                        time.sleep(delay)
+                        continue
+                    break
+
+                response.raise_for_status()
+                return response.json()
 
         raise RuntimeError(f"Roboflow request failed: {last_error or 'unknown error'}")
 
 
-def _frame_has_hit(predictions: List[Dict[str, Any]], conf_th: float) -> bool:
+def _frame_has_hit(
+    predictions: List[Dict[str, Any]], conf_th: float, suspicious_classes: List[str]
+) -> bool:
+    allowed = {item.lower() for item in suspicious_classes}
     for pred in predictions:
         conf = pred.get("confidence", pred.get("score", 0.0))
+        pred_class = str(pred.get("class", pred.get("label", ""))).strip().lower()
         try:
-            if float(conf) >= conf_th:
-                return True
+            conf_ok = float(conf) >= conf_th
         except (TypeError, ValueError):
             continue
+        if not conf_ok:
+            continue
+        if allowed and pred_class not in allowed:
+            continue
+        return True
     return False
 
 
@@ -133,7 +159,20 @@ def main() -> None:
     logger.info("Video sources: %s", video_sources)
 
     videos = discover_videos(video_sources)
+    if config.YOLO_MAX_VIDEOS > 0:
+        videos = videos[: config.YOLO_MAX_VIDEOS]
     logger.info("Discovered %d videos", len(videos))
+    if config.YOLO_MAX_VIDEOS > 0:
+        logger.info("YOLO_MAX_VIDEOS active: %d", config.YOLO_MAX_VIDEOS)
+    if config.YOLO_MAX_SECONDS > 0:
+        logger.info("YOLO_MAX_SECONDS active: %d", config.YOLO_MAX_SECONDS)
+    if config.YOLO_MAX_FRAMES_PER_VIDEO > 0:
+        logger.info(
+            "YOLO_MAX_FRAMES_PER_VIDEO active: %d",
+            config.YOLO_MAX_FRAMES_PER_VIDEO,
+        )
+    if config.YOLO_SUSPICIOUS_CLASSES:
+        logger.info("YOLO_SUSPICIOUS_CLASSES active: %s", config.YOLO_SUSPICIOUS_CLASSES)
 
     client = RoboflowHostedClient(
         api_key=config.ROBOFLOW_API_KEY,
@@ -142,6 +181,8 @@ def main() -> None:
         version=config.ROBOFLOW_VERSION,
         host=config.ROBOFLOW_API_HOST,
         timeout_sec=config.REQUEST_TIMEOUT_SEC,
+        max_retries=max(config.ROBOFLOW_MAX_RETRIES, 0),
+        retry_backoff_sec=max(config.ROBOFLOW_RETRY_BACKOFF_SEC, 0.1),
     )
 
     rows: List[Dict[str, Any]] = []
@@ -158,6 +199,11 @@ def main() -> None:
         except Exception as exc:
             logger.warning("Skipping video with sampling error %s (%s)", video_path, exc)
             continue
+
+        if config.YOLO_MAX_SECONDS > 0:
+            samples = [(ts, frame) for ts, frame in samples if ts <= config.YOLO_MAX_SECONDS]
+        if config.YOLO_MAX_FRAMES_PER_VIDEO > 0:
+            samples = samples[: config.YOLO_MAX_FRAMES_PER_VIDEO]
 
         sampled_frames = len(samples)
         frames_with_hits = 0
@@ -179,7 +225,11 @@ def main() -> None:
                 )
                 predictions = []
 
-            has_hit = _frame_has_hit(predictions, config.CONF_TH)
+            has_hit = _frame_has_hit(
+                predictions=predictions,
+                conf_th=config.CONF_TH,
+                suspicious_classes=config.YOLO_SUSPICIOUS_CLASSES,
+            )
             if has_hit:
                 frames_with_hits += 1
 
@@ -223,6 +273,10 @@ def main() -> None:
                 "conf_th": config.CONF_TH,
                 "event_th": config.EVENT_TH,
                 "sample_fps": config.SAMPLE_FPS,
+                "yolo_max_videos": config.YOLO_MAX_VIDEOS,
+                "yolo_max_frames_per_video": config.YOLO_MAX_FRAMES_PER_VIDEO,
+                "yolo_max_seconds": config.YOLO_MAX_SECONDS,
+                "yolo_suspicious_classes": config.YOLO_SUSPICIOUS_CLASSES,
             },
             "frames": per_frame,
         }

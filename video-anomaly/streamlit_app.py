@@ -126,7 +126,7 @@ def _render_csv(title: str, path: Path, key_prefix: str) -> None:
         return
 
     st.caption(f"{path} | rows: {len(df)}")
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, width="stretch")
     st.download_button(
         label=f"Download {path.name}",
         data=path.read_bytes(),
@@ -155,6 +155,17 @@ def _save_uploaded_videos(uploaded_files) -> Tuple[int, List[str]]:
         saved.append(str(output_path.resolve()))
 
     return skipped, saved
+
+
+def _missing_roboflow_fields(api_key: str, project: str, version: str) -> List[str]:
+    missing: List[str] = []
+    if not api_key.strip():
+        missing.append("ROBOFLOW_API_KEY")
+    if not project.strip():
+        missing.append("ROBOFLOW_PROJECT")
+    if not version.strip():
+        missing.append("ROBOFLOW_VERSION")
+    return missing
 
 
 def main() -> None:
@@ -198,6 +209,43 @@ def main() -> None:
         conf_th = st.number_input("CONF_TH", min_value=0.0, max_value=1.0, value=_float_value("CONF_TH", 0.35), step=0.01)
         event_th = st.number_input("EVENT_TH", min_value=0.0, max_value=1.0, value=_float_value("EVENT_TH", 0.15), step=0.01)
         sample_fps = st.number_input("SAMPLE_FPS", min_value=0.1, max_value=30.0, value=max(_float_value("SAMPLE_FPS", 1.0), 0.1), step=0.1)
+        yolo_only_uploaded = st.checkbox(
+            "YOLO only uploaded videos",
+            value=_env_or_secret("YOLO_ONLY_UPLOADED", "1").strip().lower() not in {"0", "false", "no"},
+            help="If enabled, YOLO scans only data/raw_videos instead of full default folders.",
+        )
+        yolo_max_videos = st.number_input(
+            "YOLO_MAX_VIDEOS",
+            min_value=0,
+            max_value=10000,
+            value=max(_int_value("YOLO_MAX_VIDEOS", 10), 0),
+            step=1,
+            help="0 means all discovered videos.",
+        )
+        yolo_max_frames_per_video = st.number_input(
+            "YOLO_MAX_FRAMES_PER_VIDEO",
+            min_value=0,
+            max_value=20000,
+            value=max(_int_value("YOLO_MAX_FRAMES_PER_VIDEO", 120), 0),
+            step=1,
+            help="0 means no frame cap.",
+        )
+        yolo_max_seconds = st.number_input(
+            "YOLO_MAX_SECONDS",
+            min_value=0,
+            max_value=180,
+            value=max(_int_value("YOLO_MAX_SECONDS", 120), 0),
+            step=1,
+            help="Only analyze this many seconds from each video. 0 means full clip.",
+        )
+        yolo_suspicious_classes = st.text_input(
+            "YOLO_SUSPICIOUS_CLASSES",
+            value=_env_or_secret("YOLO_SUSPICIOUS_CLASSES", ""),
+            help="Optional comma-separated class names to count as suspicious. Leave empty to count any class.",
+        )
+        st.caption(
+            "If suspicious clips are missed, try CONF_TH=0.2 and EVENT_TH=0.05 for higher recall."
+        )
 
         st.markdown("### VLM")
         vlm_base_url = st.text_input(
@@ -263,10 +311,15 @@ def main() -> None:
 
     existing_raw_videos = discover_videos([str(RAW_VIDEO_DIR)])
     st.caption(f"Videos currently in data/raw_videos: {len(existing_raw_videos)}")
+    if yolo_only_uploaded:
+        st.info("YOLO will run only on data/raw_videos for faster iteration.")
+
+    effective_video_sources_for_run = str(RAW_VIDEO_DIR) if yolo_only_uploaded else video_sources_raw
 
     runtime_env = _build_env(
         {
             "VIDEO_SOURCES": video_sources_raw,
+            "YOLO_ONLY_UPLOADED": "1" if yolo_only_uploaded else "0",
             "ROBOFLOW_API_KEY": rf_key,
             "ROBOFLOW_WORKSPACE": rf_workspace,
             "ROBOFLOW_PROJECT": rf_project,
@@ -274,6 +327,10 @@ def main() -> None:
             "CONF_TH": str(conf_th),
             "EVENT_TH": str(event_th),
             "SAMPLE_FPS": str(sample_fps),
+            "YOLO_MAX_VIDEOS": str(int(yolo_max_videos)),
+            "YOLO_MAX_FRAMES_PER_VIDEO": str(int(yolo_max_frames_per_video)),
+            "YOLO_MAX_SECONDS": str(int(yolo_max_seconds)),
+            "YOLO_SUSPICIOUS_CLASSES": yolo_suspicious_classes.strip(),
             "VLM_BASE_URL": vlm_base_url,
             "VLM_MODEL": vlm_model,
             "VLM_MODE": vlm_mode,
@@ -283,10 +340,25 @@ def main() -> None:
             "GLOBAL_SEED": str(int(global_seed)),
         }
     )
+    runtime_env["VIDEO_SOURCES"] = effective_video_sources_for_run
 
     if st.button("Scan Video Sources"):
-        videos = discover_videos(resolved_sources)
+        scan_sources = [str(RAW_VIDEO_DIR)] if yolo_only_uploaded else resolved_sources
+        videos = discover_videos(scan_sources)
         st.success(f"Discovered {len(videos)} video(s)")
+        estimated_videos = len(videos) if int(yolo_max_videos) == 0 else min(len(videos), int(yolo_max_videos))
+        if int(yolo_max_frames_per_video) > 0:
+            est_frames_per_video = int(yolo_max_frames_per_video)
+        elif int(yolo_max_seconds) > 0:
+            est_frames_per_video = max(1, int(round(float(sample_fps) * int(yolo_max_seconds))))
+        else:
+            est_frames_per_video = -1
+        if est_frames_per_video > 0:
+            st.caption(
+                f"Estimated YOLO API calls this run: ~{estimated_videos * est_frames_per_video}"
+            )
+        else:
+            st.caption("Estimated YOLO API calls: unbounded (no frame cap active).")
         preview = [str(v) for v in videos[:20]]
         if preview:
             st.write("First discovered videos:")
@@ -319,6 +391,22 @@ def main() -> None:
         steps = [("src.eval.merge_results", "MERGE")]
 
     if steps:
+        includes_yolo = any(module_name == "src.yolo.roboflow_infer" for module_name, _ in steps)
+        if includes_yolo:
+            missing_rf = _missing_roboflow_fields(rf_key, rf_project, rf_version)
+            if missing_rf:
+                st.error(
+                    "YOLO run blocked: missing required Roboflow fields: "
+                    + ", ".join(missing_rf)
+                )
+                steps = [
+                    (module_name, label)
+                    for module_name, label in steps
+                    if module_name != "src.yolo.roboflow_infer"
+                ]
+                if not steps:
+                    st.stop()
+
         logs: List[str] = []
         failures: List[str] = []
 
