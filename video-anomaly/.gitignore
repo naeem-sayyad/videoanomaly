@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
+
+# Runtime outputs
+runs/yolo_events/*.json
+runs/yolo_events/*.csv
+runs/vlm_events/*.json
+runs/vlm_events/*.csv
+runs/merged_results.csv
+
+data/frames/
+
+.DS_Store
